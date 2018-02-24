@@ -1,0 +1,122 @@
+use .java-jdk-1.8.0_92-x86-64
+use Picard-Tools
+
+## Asume bcl2fastq has already been run to get fastq files for ADT library.
+
+# Set up directories, variables
+mkdir fastq_ADT/ reports/ BAM/ CBC_mRNA/
+SAMPLE="CITE_seq_ADT_S1"
+
+# Define path variable for DropSeq tools:
+DS="/ahg/regevdata/projects/CiteSeq/scripts_DS/Drop-seq_tools-1.12/"
+
+# Define path for these scripts:
+SJR="/ahg/regevdata/projects/CiteSeq/scripts_ADT_SJR/"
+
+# Define path for ADT reference files:
+REF="/ahg/regevdata/projects/CiteSeq/Reference/"
+
+# If separate fastq.gz files per lane were generated, combine:
+
+# Combine all R1 ADT fastq.gz files:
+cat "${SAMPLE}_L00*_R1_001.fastq.gz" > "fastq_ADT/${SAMPLE}_R1_001.fastq.gz"
+
+# Combine all R2 ADT fastq.gz files:
+cat "${SAMPLE}_L00*_R2_001.fastq.gz" > "fastq_ADT/${SAMPLE}_R2_001.fastq.gz"
+
+# Convert to unaligned BAM
+java -jar $PICARD FastqToSam \
+F1="fastq_ADT/${SAMPLE}_R1_001.fastq.gz" \
+F2="fastq_ADT/${SAMPLE}_R2_001.fastq.gz" \
+O="BAM/${SAMPLE}.BAM" \
+SM="$SAMPLE"
+
+# Tag cell bar codes
+$DS/TagBamWithReadSequenceExtended \
+INPUT="BAM/${SAMPLE}.BAM" \
+OUTPUT="BAM/${SAMPLE}.unaligned_tagged_cell.bam" \
+SUMMARY="reports/${SAMPLE}.unaligned_tagged_cell.bam_summary.text" \
+BASE_RANGE=1-16 BASE_QUALITY=10 \
+BARCODED_READ=1 DISCARD_READ=False \
+TAG_NAME=XC NUM_BASES_BELOW_QUALITY=1 \
+
+# Tag UMIs
+$DS/TagBamWithReadSequenceExtended \
+INPUT="BAM/${SAMPLE}.unaligned_tagged_cell.bam" \
+OUTPUT="BAM/${SAMPLE}.unaligned_tagged_cellmolecular.bam" \
+SUMMARY="reports/${SAMPLE}.unaligned_tagged_cellmolecular.bam_summary.txt" \
+BASE_RANGE=17-26 BASE_QUALITY=10 \
+BARCODED_READ=1 DISCARD_READ=True \
+TAG_NAME=XM NUM_BASES_BELOW_QUALITY=1
+
+# Filter low-quality cell BCs and UMIs.
+## Not sure I should run this step. Might be badly configured for ADT
+## library, but so far, seemed okay.
+$DS/FilterBAM TAG_REJECT=XQ \
+INPUT="BAM/${SAMPLE}.unaligned_tagged_cellmolecular.bam" \
+OUTPUT="BAM/${SAMPLE}.unaligned_tagged_filtered.bam"
+
+# TrimStartingSequence step
+## Set SEQUENCE and other parameters appropriately
+## This step does not currently work as desired right if there are
+## mismatches in sequence to be trimmed with the sequence specified.
+$DS/TrimStartingSequence \ 
+INPUT="BAM/${SAMPLE}.unaligned_tagged_filtered.bam" \
+OUTPUT="BAM/${SAMPLE}.unaligned_tagged_trimmed.bam" \
+OUTPUT_SUMMARY="reports/${SAMPLE}.adapter_trimming_report.txt" \
+SEQUENCE=AT MISMATCHES=0 NUM_BASES=2 
+
+# Trim poly A
+$DS/PolyATrimmer \
+INPUT="BAM/${SAMPLE}.unaligned_tagged_trimmed.bam" \
+OUTPUT="BAM/${SAMPLE}.unaligned_mc_tagged_polyA_filtered.bam" \
+OUTPUT_SUMMARY="reports/${SAMPLE}.polyA_trimming_report.txt" \
+MISMATCHES=0 NUM_BASES=6
+
+# SamToFastq
+java -Xmx4g -jar $PICARD SamToFastq
+INPUT="BAM/${SAMPLE}.unaligned_mc_tagged_polyA_filtered.bam"
+FASTQ="fastq_ADT/${SAMPLE}.unaligned_mc_tagged_polyA_filtered.fastq"
+
+# Get number of sequences (takes a few sec)
+wc -l "fastq_ADT/${SAMPLE}.unaligned_mc_tagged_polyA_filtered.fastq"
+## Returns: L # number of lines in fastq
+## Divide by 4 => N=L/4 # number of sequences
+## Use N to determine how many tasks to submit for alignment (divide by
+## number of sequences aligned per task)
+
+# Set parameters appropriately inside this script template,
+# and then qsub it (or just run it) to align ADT bar codes:
+qsub scripts_ADT/run.align_reads_to_BCs_genlen.example.sh
+
+# If alignment job is broken into task array,
+# concatenate all ouput sam files when finished
+$CIT/scripts_AB_SJR/concat_sam.sh "BAM/${SAMPLE}.sjrAlign/" "BAM/${SAMPLE}.sjrAligned.sam" > "reports/${SAMPLE}.concat_sam.report.txt"
+
+# SortSAM to BAM
+java -Xmx4g -jar $PICARD SortSam I="BAM/${SAMPLE}.sjrAligned.sam" O="BAM/${SAMPLE}.sjrAligned.sorted.bam SO=queryname
+
+# Run MergeBamAlignment
+java -Xmx4g -jar $PICARD MergeBamAlignment REFERENCE_SEQUENCE="${REF}/AB_BC.ADT.fa" UNMAPPED_BAM="BAM/${SAMPLE}.unaligned_mc_tagged_polyA_filtered.bam" ALIGNED_BAM="BAM/${SAMPLE}.sjrAligned.sorted.bam" OUTPUT="BAM/${SAMPLE}.merged.bam INCLUDE_SECONDARY_ALIGNMENTS=false PAIRED_RUN=false
+
+# TagReadWithGeneExon (I think this is required for DGE by Drop-seq tools)
+$DS/TagReadWithGeneExon I="BAM/${SAMPLE}.merged.bam \
+O="BAM/${SAMPLE}.sjrAligned_GE_tagged.bam" \
+ANNOTATIONS_FILE="${REF}/AB_BC.ADT.refFlat" TAG=GE
+
+# Get cell bar codes from corresponding mRNA 10X CellRanger library, e.g.,:
+cat "${MRNA_10X_PATH}/outs/filtered_gene_bc_matrices/mm10/barcodes.tsv" | sort | uniq > "CBC_mRNA/${SAMPLE}.barcodes_mm10.tsv"
+
+# Double check there is only one GEM group here:
+cut -d '-' -f 2 "CBC_mRNA/${SAMPLE}.barcodes_mm10.tsv" | uniq
+# Returns: 1
+
+# In that case, get rid of GEM code in cell barcodes:
+sed 's/-1//' "CBC_mRNA/${SAMPLE}.barcodes_mm10.tsv" > "CBC_mRNA/${SAMPLE}.barcodes_mm10.no_GEM.tsv"
+
+# Optional: Check how many mRNA cell barcodes 10X CellRanger found
+wc -l "CBC_ mRNA/${SAMPLE}.barcodes_mm10.no_GEM.tsv"
+
+# Set parameters inside this script template and then qsub it to
+# quantify digital gene expression for the ADT library:
+qsub run.dge.cbcf_mrna.example.sh

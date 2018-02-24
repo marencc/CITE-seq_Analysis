@@ -1,0 +1,12 @@
+[Header],,,,
+EMFileVersion,4,,,
+,,,,
+[Reads],,,,
+26,,,,
+57,,,,
+,,,,
+[Data],,,,
+Lane,Sample_ID,Sample_Name,index,Sample_Project
+,Protein_17092503,B16,ATCACG,Pilot_citeseq_conjugation
+,Protein_17111001,48H,CGATGT,Pilot_citeseq_conjugation_biolegend
+,Protein_17111002,B16,TTAGGC,Pilot_citeseq_conjugation_biolegend
